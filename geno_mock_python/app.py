@@ -3233,6 +3233,7 @@ INDEX_HTML = """<!doctype html>
 
       if (state.granularity === "Allele") {
         tableConfig.multilineCols = ["DNA Change", "Exon/Intron", "HGVS Transcript"];
+        tableConfig.topScrollbar = true;
         tableConfig.onRowClick = (row, idx, key, rawRow) => {
           const source = rawRow || row;
           const rows = isbtVariantRowsFromAlleleRow(source);

@@ -2939,6 +2939,20 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json_head(self, payload, status=200):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+
+    def _send_html_head(self, html_text, status=200):
+        body = html_text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
@@ -2952,6 +2966,20 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "last": latest, "count": len(FEEDBACK_LOG)})
             return
         self._send_json({"ok": False, "error": "Not found"}, status=404)
+
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            self._send_html_head(INDEX_HTML)
+            return
+        if parsed.path == "/api/init":
+            self._send_json_head(INIT_PAYLOAD)
+            return
+        if parsed.path == "/api/feedback/latest":
+            latest = FEEDBACK_LOG[-1] if FEEDBACK_LOG else None
+            self._send_json_head({"ok": True, "last": latest, "count": len(FEEDBACK_LOG)})
+            return
+        self._send_json_head({"ok": False, "error": "Not found"}, status=404)
 
     def do_POST(self):
         parsed = urlparse(self.path)

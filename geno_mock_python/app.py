@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+from html import unescape
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -702,6 +703,7 @@ exon_view_cols = list(exon_table[0].keys()) if exon_table else []
 ISBT_SYSTEMS_URL = "https://api-blooddatabase.isbtweb.org/system"
 ISBT_ANTIGEN_URL = "https://api-blooddatabase.isbtweb.org/antigen/search?system_symbol="
 ISBT_ALLELE_URL = "https://api-blooddatabase.isbtweb.org/allele/search?system_symbol="
+ISBT_RELEASE_SEARCH_URL = "https://api-blooddatabase.isbtweb.org/release/search?page=1&limit=12"
 ISBT_CACHE_PATH = ROOT_DIR / "isbt_cache.json"
 ISBT_CACHE_MAX_DAYS = 30
 ISBT_FLAG_COLS = ["sv_allele", "null_allele", "mod_allele", "partial_allele", "weak_allele", "el_allele"]
@@ -736,6 +738,57 @@ def extract_records(payload):
                 return [item for item in value if isinstance(item, dict)]
         return [payload]
     return []
+
+
+def strip_html(value):
+    txt = clean_text(value)
+    if not txt:
+        return ""
+    no_tags = re.sub(r"<[^>]+>", " ", txt)
+    plain = unescape(no_tags)
+    return re.sub(r"\s+", " ", plain).strip()
+
+
+def build_release_history_rows():
+    payload = fetch_json(ISBT_RELEASE_SEARCH_URL)
+    records = []
+    if isinstance(payload, dict):
+        data_rows = payload.get("data")
+        if isinstance(data_rows, list):
+            records = [row for row in data_rows if isinstance(row, dict)]
+    elif isinstance(payload, list):
+        records = [row for row in payload if isinstance(row, dict)]
+
+    releases = []
+    for row in records:
+        release_version = to_int(row.get("releaseVersion"))
+        suggestion_count = to_int(row.get("suggestionCount"))
+        releases.append(
+            {
+                "id": to_int(row.get("id")),
+                "name": clean_text(row.get("name")),
+                "releaseVersion": release_version if release_version is not None else clean_text(row.get("releaseVersion")),
+                "appliedAt": clean_text(row.get("appliedAt")),
+                "updatedAt": clean_text(row.get("updatedAt")),
+                "suggestionCount": suggestion_count if suggestion_count is not None else clean_text(row.get("suggestionCount")),
+                "alleleCount": to_int(row.get("alleleCount")),
+                "variantCount": to_int(row.get("variantCount")),
+                "antigenCount": to_int(row.get("antigenCount")),
+                "geneCount": to_int(row.get("geneCount")),
+                "systemCount": to_int(row.get("systemCount")),
+                "notesSummary": strip_html(row.get("notes")),
+            }
+        )
+
+    releases.sort(
+        key=lambda row: (
+            to_int(row.get("releaseVersion")) if to_int(row.get("releaseVersion")) is not None else -1,
+            clean_text(row.get("appliedAt")),
+            clean_text(row.get("updatedAt")),
+        ),
+        reverse=True,
+    )
+    return releases
 
 
 def flatten_record(record, prefix=""):
@@ -992,6 +1045,7 @@ def build_isbt_dataset():
     antigens = []
     alleles = []
     variants = []
+    releases = []
     pull_errors = []
 
     for symbol in symbols:
@@ -1120,16 +1174,22 @@ def build_isbt_dataset():
     grouped_rows = make_isbt_grouped_rows(variants)
     raw_export_columns = sorted({key for row in variants for key in row.keys() if not key.startswith("__")})
 
+    try:
+        releases = build_release_history_rows()
+    except Exception as exc:
+        pull_errors.append(f"release_search:{clean_text(exc)}")
+
     meta = {
         "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "updated_epoch": now_utc_epoch(),
-        "source_urls": [ISBT_SYSTEMS_URL, ISBT_ANTIGEN_URL + "<SYMBOL>", ISBT_ALLELE_URL + "<SYMBOL>"],
+        "source_urls": [ISBT_SYSTEMS_URL, ISBT_ANTIGEN_URL + "<SYMBOL>", ISBT_ALLELE_URL + "<SYMBOL>", ISBT_RELEASE_SEARCH_URL],
         "row_counts": {
             "systems": len(systems),
             "antigens": len(antigens),
             "alleles": len(alleles),
             "variants": len(variants),
             "grouped_rows": len(grouped_rows),
+            "releases": len(releases),
         },
         "pull_errors": pull_errors,
     }
@@ -1140,6 +1200,7 @@ def build_isbt_dataset():
         "antigens": antigens,
         "alleles": alleles,
         "variants": variants,
+        "releases": releases,
         "groups": groups,
         "grouped_rows": grouped_rows,
         "columns": {
@@ -1154,8 +1215,8 @@ def empty_isbt_dataset(error_message=""):
         "metadata": {
             "updated_at": "Not available",
             "updated_epoch": 0,
-            "source_urls": [ISBT_SYSTEMS_URL, ISBT_ANTIGEN_URL + "<SYMBOL>", ISBT_ALLELE_URL + "<SYMBOL>"],
-            "row_counts": {"systems": 0, "antigens": 0, "alleles": 0, "variants": 0, "grouped_rows": 0},
+            "source_urls": [ISBT_SYSTEMS_URL, ISBT_ANTIGEN_URL + "<SYMBOL>", ISBT_ALLELE_URL + "<SYMBOL>", ISBT_RELEASE_SEARCH_URL],
+            "row_counts": {"systems": 0, "antigens": 0, "alleles": 0, "variants": 0, "grouped_rows": 0, "releases": 0},
             "pull_errors": [],
             "error": clean_text(error_message),
         },
@@ -1163,6 +1224,7 @@ def empty_isbt_dataset(error_message=""):
         "antigens": [],
         "alleles": [],
         "variants": [],
+        "releases": [],
         "groups": [],
         "grouped_rows": [],
         "columns": {"grouped_view": ISBT_GROUPED_VIEW_COLS, "raw_export": []},
@@ -1183,6 +1245,18 @@ def load_isbt_dataset():
         if updated_epoch > 0:
             age_days = (now_utc_epoch() - updated_epoch) / 86400.0
             if age_days <= ISBT_CACHE_MAX_DAYS:
+                cached_releases = cached.get("releases")
+                if not isinstance(cached_releases, list) or not cached_releases:
+                    try:
+                        cached["releases"] = build_release_history_rows()
+                        cached_meta = cached.setdefault("metadata", {})
+                        cached_counts = cached_meta.setdefault("row_counts", {})
+                        cached_counts["releases"] = len(cached.get("releases", []))
+                        with ISBT_CACHE_PATH.open("w", encoding="utf-8") as handle:
+                            json.dump(cached, handle, ensure_ascii=False)
+                    except Exception as exc:
+                        cached_meta = cached.setdefault("metadata", {})
+                        cached_meta["release_feed_error"] = clean_text(exc)
                 return cached
 
     try:
@@ -2758,37 +2832,68 @@ INDEX_HTML = """<!doctype html>
       updateDownloadContext();
     }
 
+    function formatUtcDateTime(value) {
+      const raw = text(value).trim();
+      if (!raw) return "Unknown";
+      const dt = new Date(raw);
+      if (Number.isNaN(dt.getTime())) return raw;
+      return dt.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZoneName: "short"
+      });
+    }
+
     function renderLatestUpdates() {
       const root = document.getElementById("latest-updates");
       root.innerHTML = "";
       const ul = document.createElement("ul");
       const isbtMeta = (DATA.isbt && DATA.isbt.metadata) ? DATA.isbt.metadata : {};
-      const rowCounts = isbtMeta.row_counts || {};
-      const groupCount = (DATA.isbt && Array.isArray(DATA.isbt.groups)) ? DATA.isbt.groups.length : 0;
-      const lines = [
-        "ISBT groups loaded: " + Number(groupCount || 0).toLocaleString(),
-        "ISBT grouped allele rows: " + Number(rowCounts.grouped_rows || 0).toLocaleString(),
-        "ISBT raw variant rows: " + Number(rowCounts.variants || 0).toLocaleString(),
-        "ISBT systems covered: " + Number(rowCounts.systems || 0).toLocaleString(),
-        "ISBT last pulled: " + text(isbtMeta.updated_at || "Not available"),
-        "Cache contingency: cached ISBT data is reused on refresh failure and kept up to 30 days."
-      ];
+      const releases = (DATA.isbt && Array.isArray(DATA.isbt.releases)) ? DATA.isbt.releases : [];
 
-      if (DATA.isbt && DATA.isbt.metadata) {
-        const pullErrors = Array.isArray(isbtMeta.pull_errors) ? isbtMeta.pull_errors : [];
-        if (pullErrors.length > 0) {
-          lines.push("ISBT refresh warnings: " + pullErrors.length.toLocaleString() + " symbol-level fetch errors.");
-        }
-        if (isbtMeta.refresh_error) {
-          lines.push("ISBT refresh error: " + text(isbtMeta.refresh_error));
-        }
-        if (isbtMeta.error) {
-          lines.push("ISBT load error: " + text(isbtMeta.error));
-        }
-        if (isbtMeta.cache_write_error) {
-          lines.push("ISBT cache write warning: " + text(isbtMeta.cache_write_error));
-        }
+      const lines = [];
+      if (releases.length > 0) {
+        lines.push("ISBT release history (latest first):");
+        releases.slice(0, 10).forEach((release) => {
+          const version = text(release.releaseVersion || "?");
+          const name = text(release.name || "Unnamed release");
+          const applied = formatUtcDateTime(release.appliedAt || release.updatedAt || "");
+          const suggestionCount = Number(release.suggestionCount || 0).toLocaleString();
+          const notesSummary = text(release.notesSummary || "");
+          let line = "Release " + version + " - " + name + " | Applied: " + applied + " | Suggestions: " + suggestionCount;
+          if (notesSummary) {
+            line += " | Notes: " + notesSummary;
+          }
+          lines.push(line);
+        });
+      } else {
+        lines.push("No ISBT release history is currently available.");
       }
+
+      lines.push("ISBT data pulled: " + text(isbtMeta.updated_at || "Not available"));
+      lines.push("Cache contingency: cached ISBT data is reused on refresh failure and kept up to 30 days.");
+
+      const pullErrors = Array.isArray(isbtMeta.pull_errors) ? isbtMeta.pull_errors : [];
+      if (pullErrors.length > 0) {
+        lines.push("ISBT refresh warnings: " + pullErrors.length.toLocaleString() + " fetch errors.");
+      }
+      if (isbtMeta.release_feed_error) {
+        lines.push("ISBT release feed warning: " + text(isbtMeta.release_feed_error));
+      }
+      if (isbtMeta.refresh_error) {
+        lines.push("ISBT refresh error: " + text(isbtMeta.refresh_error));
+      }
+      if (isbtMeta.error) {
+        lines.push("ISBT load error: " + text(isbtMeta.error));
+      }
+      if (isbtMeta.cache_write_error) {
+        lines.push("ISBT cache write warning: " + text(isbtMeta.cache_write_error));
+      }
+
       lines.forEach((line) => {
         const li = document.createElement("li");
         li.textContent = line;

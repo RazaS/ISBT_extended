@@ -1,4 +1,6 @@
 .DS_Store
 __pycache__/
 *.pyc
+.venv/
+.automation.lock
 variant_sequence_cache.json

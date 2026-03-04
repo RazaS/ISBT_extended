@@ -1002,20 +1002,66 @@ def make_isbt_variant_rows(variants_rows):
         for group in variant_target_groups(raw):
             variant_rows.append(to_isbt_variant_view_row(raw, group))
 
-    variant_rows = dedupe_rows(
-        variant_rows,
-        ["Group", "Allele_id", "Variant_id", "DNA Change", "Exon/Intron", "HGVS Transcript"],
-    )
-    variant_rows.sort(
+    by_variant_id = {}
+    order = []
+
+    def nonempty_score(row):
+        fields = ["DNA Change", "Exon/Intron", "HGVS Transcript", "Gene_name", "Allele_id", "ISBT_Allele"]
+        return sum(1 for field in fields if clean_text(row.get(field, "")).strip() and clean_text(row.get(field, "")) != "-")
+
+    for row in variant_rows:
+        variant_id = clean_text(row.get("Variant_id", "")).strip()
+        if not variant_id:
+            variant_id = f"missing_variant_id:{len(order) + 1}"
+            row["Variant_id"] = variant_id
+
+        if variant_id not in by_variant_id:
+            by_variant_id[variant_id] = {
+                "row": dict(row),
+                "allele_ids": unique_keep_order([clean_text(row.get("Allele_id", ""))]),
+                "allele_names": unique_keep_order([clean_text(row.get("ISBT_Allele", ""))]),
+                "groups": unique_keep_order([clean_text(row.get("Group", ""))]),
+                "score": nonempty_score(row),
+            }
+            order.append(variant_id)
+            continue
+
+        entry = by_variant_id[variant_id]
+        candidate_score = nonempty_score(row)
+        if candidate_score > entry["score"]:
+            entry["row"] = dict(row)
+            entry["score"] = candidate_score
+
+        entry["allele_ids"] = unique_keep_order(entry["allele_ids"] + [clean_text(row.get("Allele_id", ""))])
+        entry["allele_names"] = unique_keep_order(entry["allele_names"] + [clean_text(row.get("ISBT_Allele", ""))])
+        entry["groups"] = unique_keep_order(entry["groups"] + [clean_text(row.get("Group", ""))])
+
+    out_rows = []
+    for variant_id in order:
+        entry = by_variant_id[variant_id]
+        row = dict(entry["row"])
+        allele_ids = [value for value in entry["allele_ids"] if value]
+        allele_names = [value for value in entry["allele_names"] if value]
+        groups = [value for value in entry["groups"] if value]
+
+        if allele_ids:
+            row["Allele_id"] = ", ".join(allele_ids)
+        if allele_names:
+            row["ISBT_Allele"] = ", ".join(allele_names)
+        if groups:
+            row["Group"] = ", ".join(groups)
+            row["__group"] = groups[0]
+        out_rows.append(row)
+
+    out_rows.sort(
         key=lambda row: (
             clean_text(row.get("Group", "")),
-            clean_text(row.get("ISBT_Allele", "")),
             parse_c_position(row.get("DNA Change", "")),
             clean_text(row.get("DNA Change", "")),
             clean_text(row.get("Variant_id", "")),
         )
     )
-    return variant_rows
+    return out_rows
 
 
 def make_isbt_grouped_rows(variants_rows):
@@ -1468,8 +1514,9 @@ def ensure_isbt_dataset_shape(dataset):
         dataset["grouped_rows"] = make_isbt_grouped_rows(dataset.get("variants", []))
     if not isinstance(dataset.get("groups"), list):
         dataset["groups"] = []
-    if not isinstance(dataset.get("variant_rows"), list):
-        dataset["variant_rows"] = make_isbt_variant_rows(dataset.get("variants", []))
+    # Always regenerate variant_rows to keep one-row-per-Variant_id guarantees
+    # even when older cache payloads already contain stale/duplicated variant_rows.
+    dataset["variant_rows"] = make_isbt_variant_rows(dataset.get("variants", []))
     if not isinstance(dataset.get("table_updates"), list):
         updates, _ = build_isbt_table_update_rows(dataset.get("variants", []), max_events=40, use_history=False)
         dataset["table_updates"] = updates
@@ -2435,10 +2482,18 @@ INDEX_HTML = """<!doctype html>
     function isbtAlleleRowsFromVariantRow(variantRow) {
       const groupedRows = (DATA.isbt && Array.isArray(DATA.isbt.grouped_rows)) ? DATA.isbt.grouped_rows : [];
       const group = text(variantRow.__group || variantRow.Group || "");
+      const variantId = text(variantRow.Variant_id || variantRow.variant_id || variantRow.id || "");
       const alleleId = text(variantRow.Allele_id || variantRow.allele_id || "");
       const isbtAllele = text(variantRow.ISBT_Allele || variantRow.isbt_allele || "");
       return groupedRows.filter((row) => {
         if (group && text(row.__group) !== group) return false;
+        const rawRows = Array.isArray(row.__raw_variant_rows) ? row.__raw_variant_rows : [];
+        if (variantId) {
+          const hasVariant = rawRows.some((raw) => {
+            return text(raw.variant_id || raw.Variant_id || raw.id || "") === variantId;
+          });
+          if (hasVariant) return true;
+        }
         const rowAlleleId = text(row.Allele_id || "");
         const rowIsbtAllele = text(row.ISBT_Allele || "");
         if (alleleId && rowAlleleId === alleleId) return true;

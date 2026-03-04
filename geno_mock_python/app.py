@@ -704,6 +704,7 @@ ISBT_SYSTEMS_URL = "https://api-blooddatabase.isbtweb.org/system"
 ISBT_ANTIGEN_URL = "https://api-blooddatabase.isbtweb.org/antigen/search?system_symbol="
 ISBT_ALLELE_URL = "https://api-blooddatabase.isbtweb.org/allele/search?system_symbol="
 ISBT_RELEASE_SEARCH_URL = "https://api-blooddatabase.isbtweb.org/release/search?page=1&limit=12"
+ISBT_VARIANT_VERSION_HISTORY_URL = "https://api-blooddatabase.isbtweb.org/variant/version-history"
 ISBT_CACHE_PATH = ROOT_DIR / "isbt_cache.json"
 ISBT_CACHE_MAX_DAYS = 30
 ISBT_FLAG_COLS = ["sv_allele", "null_allele", "mod_allele", "partial_allele", "weak_allele", "el_allele"]
@@ -712,6 +713,22 @@ ISBT_GROUPED_VIEW_COLS = [
     "Allele_id",
     "ISBT_Allele",
     "Gene_name",
+    "DNA Change",
+    "Exon/Intron",
+    "HGVS Transcript",
+    "sv_allele",
+    "null_allele",
+    "mod_allele",
+    "partial_allele",
+    "weak_allele",
+    "el_allele",
+]
+ISBT_VARIANT_VIEW_COLS = [
+    "Group",
+    "Allele_id",
+    "ISBT_Allele",
+    "Gene_name",
+    "Variant_id",
     "DNA Change",
     "Exon/Intron",
     "HGVS Transcript",
@@ -953,18 +970,59 @@ def variant_matches_group(variant_row, selected_group):
     return symbol == group
 
 
+def variant_target_groups(variant_row):
+    symbol = first_nonempty_ci(variant_row, ["system_symbol"]).upper()
+    if not symbol:
+        return []
+    if symbol == "RH":
+        groups = [group for group in ("RHD", "RHCE") if variant_matches_group(variant_row, group)]
+        return groups
+    return [symbol]
+
+
+def to_isbt_variant_view_row(raw_row, group):
+    out = dict(raw_row)
+    out["Group"] = group
+    out["__group"] = group
+    out["Allele_id"] = first_nonempty_ci(raw_row, ["allele_id", "Allele_id"])
+    out["ISBT_Allele"] = first_nonempty_ci(raw_row, ["isbt_allele", "allele_name", "ISBT_Allele"])
+    out["Gene_name"] = first_nonempty_ci(raw_row, ["gene_name", "gene", "Gene_name"])
+    out["Variant_id"] = first_nonempty_ci(raw_row, ["variant_id", "id", "Variant_id"])
+    out["DNA Change"] = first_nonempty_ci(raw_row, ["DNA Change", "dna_change", "input", "nucleotide_change", "hgvs"]) or "-"
+    out["Exon/Intron"] = first_nonempty_ci(raw_row, ["Exon/Intron", "exon_intron"]) or "-"
+    out["HGVS Transcript"] = first_nonempty_ci(raw_row, ["HGVS Transcript", "hgvs_transcript", "input", "hgvs"]) or "-"
+    for flag_col in ISBT_FLAG_COLS:
+        out[flag_col] = to_bool_flag_text(first_nonempty_ci(raw_row, [flag_col]))
+    return out
+
+
+def make_isbt_variant_rows(variants_rows):
+    variant_rows = []
+    for raw in variants_rows:
+        for group in variant_target_groups(raw):
+            variant_rows.append(to_isbt_variant_view_row(raw, group))
+
+    variant_rows = dedupe_rows(
+        variant_rows,
+        ["Group", "Allele_id", "Variant_id", "DNA Change", "Exon/Intron", "HGVS Transcript"],
+    )
+    variant_rows.sort(
+        key=lambda row: (
+            clean_text(row.get("Group", "")),
+            clean_text(row.get("ISBT_Allele", "")),
+            parse_c_position(row.get("DNA Change", "")),
+            clean_text(row.get("DNA Change", "")),
+            clean_text(row.get("Variant_id", "")),
+        )
+    )
+    return variant_rows
+
+
 def make_isbt_grouped_rows(variants_rows):
     by_group = {}
     for row in variants_rows:
-        symbol = first_nonempty_ci(row, ["system_symbol"]).upper()
-        if not symbol:
-            continue
-        target_groups = [symbol]
-        if symbol == "RH":
-            target_groups = ["RHD", "RHCE"]
-        for group in target_groups:
-            if variant_matches_group(row, group):
-                by_group.setdefault(group, []).append(row)
+        for group in variant_target_groups(row):
+            by_group.setdefault(group, []).append(row)
 
     grouped_rows = []
     for group, group_rows in by_group.items():
@@ -1006,6 +1064,7 @@ def make_isbt_grouped_rows(variants_rows):
                 "__group": group,
                 "__row_key": row_key,
                 "__raw_variant_rows": rows_sorted,
+                "__variant_view_rows": [to_isbt_variant_view_row(raw, group) for raw in rows_sorted],
             }
             for flag_col in ISBT_FLAG_COLS:
                 grouped_row[flag_col] = first_nonempty_ci(first_row, [flag_col])
@@ -1019,6 +1078,135 @@ def make_isbt_grouped_rows(variants_rows):
         )
     )
     return grouped_rows
+
+
+def parse_iso_datetime_utc(raw_value):
+    txt = clean_text(raw_value).strip()
+    if not txt:
+        return None
+    if txt.endswith("Z"):
+        txt = txt[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(txt)
+    except ValueError:
+        return None
+
+
+def make_isbt_update_row(variant_row, group, event_at, operation="", actor="", version=""):
+    return {
+        "Group": clean_text(group),
+        "Variant_id": first_nonempty_ci(variant_row, ["variant_id", "id", "Variant_id"]),
+        "Allele_id": first_nonempty_ci(variant_row, ["allele_id", "Allele_id"]),
+        "ISBT_Allele": first_nonempty_ci(variant_row, ["isbt_allele", "allele_name", "ISBT_Allele"]),
+        "Gene_name": first_nonempty_ci(variant_row, ["gene_name", "gene", "Gene_name"]),
+        "DNA Change": first_nonempty_ci(variant_row, ["DNA Change", "dna_change", "input", "nucleotide_change", "hgvs"]) or "-",
+        "Exon/Intron": first_nonempty_ci(variant_row, ["Exon/Intron", "exon_intron"]) or "-",
+        "HGVS Transcript": first_nonempty_ci(variant_row, ["HGVS Transcript", "hgvs_transcript", "input", "hgvs"]) or "-",
+        "eventAt": clean_text(event_at),
+        "operation": clean_text(operation).lower() or "update",
+        "actor": clean_text(actor),
+        "version": clean_text(version) or first_nonempty_ci(variant_row, ["version"]),
+    }
+
+
+def build_isbt_table_update_rows(variant_rows, max_events=40, use_history=True):
+    if not isinstance(variant_rows, list) or not variant_rows:
+        return [], []
+
+    def row_event_epoch(row):
+        dt = parse_iso_datetime_utc(first_nonempty_ci(row, ["updatedAt", "createdAt"]))
+        return int(dt.timestamp()) if dt else 0
+
+    sorted_rows = sorted(
+        variant_rows,
+        key=lambda row: (
+            row_event_epoch(row),
+            clean_text(first_nonempty_ci(row, ["variant_id", "id"])),
+        ),
+        reverse=True,
+    )
+
+    updates = []
+    warnings = []
+
+    if use_history:
+        variant_candidates = []
+        seen_variant_ids = set()
+        for row in sorted_rows:
+            variant_id = first_nonempty_ci(row, ["variant_id", "id"])
+            if not variant_id or variant_id in seen_variant_ids:
+                continue
+            seen_variant_ids.add(variant_id)
+            variant_candidates.append((variant_id, row))
+            if len(variant_candidates) >= 30:
+                break
+
+        for variant_id, row in variant_candidates:
+            history_url = (
+                f"{ISBT_VARIANT_VERSION_HISTORY_URL}"
+                f"?variant_id={quote(variant_id)}&all_versions=true&offset=0&limit=3"
+            )
+            try:
+                history_payload = fetch_json(history_url)
+                history_rows = extract_records(history_payload)
+            except Exception as exc:
+                warnings.append(f"variant_version_history:{variant_id}:{clean_text(exc)}")
+                history_rows = []
+
+            if not history_rows:
+                history_rows = [{}]
+
+            for history_row in history_rows[:2]:
+                variant_data = history_row.get("variant_data") if isinstance(history_row, dict) else {}
+                merged = dict(row)
+                if isinstance(variant_data, dict):
+                    for key, value in variant_data.items():
+                        if isinstance(value, (dict, list)):
+                            continue
+                        merged[key] = clean_text(value)
+
+                event_at = first_nonempty_ci(history_row, ["created_at", "createdAt", "updatedAt"]) or first_nonempty_ci(
+                    merged, ["updatedAt", "createdAt"]
+                )
+                operation = first_nonempty_ci(history_row, ["operation"]) or "update"
+                actor = first_nonempty_ci(history_row, ["createdBy", "updatedBy"])
+                version = first_nonempty_ci(variant_data, ["version"]) if isinstance(variant_data, dict) else ""
+                for group in variant_target_groups(merged):
+                    updates.append(make_isbt_update_row(merged, group, event_at, operation=operation, actor=actor, version=version))
+
+            if len(updates) >= max_events * 3:
+                break
+
+    if not updates:
+        for row in sorted_rows[: max_events * 2]:
+            event_at = first_nonempty_ci(row, ["updatedAt", "createdAt"])
+            for group in variant_target_groups(row):
+                updates.append(
+                    make_isbt_update_row(
+                        row,
+                        group,
+                        event_at,
+                        operation="update",
+                        actor="",
+                        version=first_nonempty_ci(row, ["version"]),
+                    )
+                )
+
+    updates = dedupe_rows(updates, ["Group", "Variant_id", "operation", "eventAt", "version"])
+
+    def update_event_epoch(update_row):
+        dt = parse_iso_datetime_utc(update_row.get("eventAt"))
+        return int(dt.timestamp()) if dt else 0
+
+    updates.sort(
+        key=lambda row: (
+            update_event_epoch(row),
+            clean_text(row.get("Group", "")),
+            clean_text(row.get("Variant_id", "")),
+        ),
+        reverse=True,
+    )
+    return updates[:max_events], warnings
 
 
 def build_isbt_dataset():
@@ -1172,7 +1360,12 @@ def build_isbt_dataset():
     groups = unique_keep_order(groups)
 
     grouped_rows = make_isbt_grouped_rows(variants)
-    raw_export_columns = sorted({key for row in variants for key in row.keys() if not key.startswith("__")})
+    variant_rows = make_isbt_variant_rows(variants)
+    table_updates, revision_warnings = build_isbt_table_update_rows(variants, max_events=40, use_history=True)
+    pull_errors.extend(revision_warnings)
+    raw_export_columns = sorted(
+        {key for row in (variants + variant_rows) for key in row.keys() if not key.startswith("__")}
+    )
 
     try:
         releases = build_release_history_rows()
@@ -1182,13 +1375,21 @@ def build_isbt_dataset():
     meta = {
         "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "updated_epoch": now_utc_epoch(),
-        "source_urls": [ISBT_SYSTEMS_URL, ISBT_ANTIGEN_URL + "<SYMBOL>", ISBT_ALLELE_URL + "<SYMBOL>", ISBT_RELEASE_SEARCH_URL],
+        "source_urls": [
+            ISBT_SYSTEMS_URL,
+            ISBT_ANTIGEN_URL + "<SYMBOL>",
+            ISBT_ALLELE_URL + "<SYMBOL>",
+            ISBT_RELEASE_SEARCH_URL,
+            ISBT_VARIANT_VERSION_HISTORY_URL + "?variant_id=<ID>&all_versions=true",
+        ],
         "row_counts": {
             "systems": len(systems),
             "antigens": len(antigens),
             "alleles": len(alleles),
             "variants": len(variants),
             "grouped_rows": len(grouped_rows),
+            "variant_rows": len(variant_rows),
+            "table_updates": len(table_updates),
             "releases": len(releases),
         },
         "pull_errors": pull_errors,
@@ -1201,10 +1402,13 @@ def build_isbt_dataset():
         "alleles": alleles,
         "variants": variants,
         "releases": releases,
+        "variant_rows": variant_rows,
+        "table_updates": table_updates,
         "groups": groups,
         "grouped_rows": grouped_rows,
         "columns": {
             "grouped_view": ISBT_GROUPED_VIEW_COLS,
+            "variant_view": ISBT_VARIANT_VIEW_COLS,
             "raw_export": raw_export_columns,
         },
     }
@@ -1215,8 +1419,23 @@ def empty_isbt_dataset(error_message=""):
         "metadata": {
             "updated_at": "Not available",
             "updated_epoch": 0,
-            "source_urls": [ISBT_SYSTEMS_URL, ISBT_ANTIGEN_URL + "<SYMBOL>", ISBT_ALLELE_URL + "<SYMBOL>", ISBT_RELEASE_SEARCH_URL],
-            "row_counts": {"systems": 0, "antigens": 0, "alleles": 0, "variants": 0, "grouped_rows": 0, "releases": 0},
+            "source_urls": [
+                ISBT_SYSTEMS_URL,
+                ISBT_ANTIGEN_URL + "<SYMBOL>",
+                ISBT_ALLELE_URL + "<SYMBOL>",
+                ISBT_RELEASE_SEARCH_URL,
+                ISBT_VARIANT_VERSION_HISTORY_URL + "?variant_id=<ID>&all_versions=true",
+            ],
+            "row_counts": {
+                "systems": 0,
+                "antigens": 0,
+                "alleles": 0,
+                "variants": 0,
+                "grouped_rows": 0,
+                "variant_rows": 0,
+                "table_updates": 0,
+                "releases": 0,
+            },
             "pull_errors": [],
             "error": clean_text(error_message),
         },
@@ -1225,10 +1444,75 @@ def empty_isbt_dataset(error_message=""):
         "alleles": [],
         "variants": [],
         "releases": [],
+        "variant_rows": [],
+        "table_updates": [],
         "groups": [],
         "grouped_rows": [],
-        "columns": {"grouped_view": ISBT_GROUPED_VIEW_COLS, "raw_export": []},
+        "columns": {"grouped_view": ISBT_GROUPED_VIEW_COLS, "variant_view": ISBT_VARIANT_VIEW_COLS, "raw_export": []},
     }
+
+
+def ensure_isbt_dataset_shape(dataset):
+    if not isinstance(dataset, dict):
+        return empty_isbt_dataset("Invalid ISBT dataset shape")
+
+    dataset.setdefault("systems", [])
+    dataset.setdefault("antigens", [])
+    dataset.setdefault("alleles", [])
+    dataset.setdefault("variants", [])
+    dataset.setdefault("releases", [])
+    dataset.setdefault("groups", [])
+    dataset.setdefault("grouped_rows", [])
+
+    if not isinstance(dataset.get("grouped_rows"), list):
+        dataset["grouped_rows"] = make_isbt_grouped_rows(dataset.get("variants", []))
+    if not isinstance(dataset.get("groups"), list):
+        dataset["groups"] = []
+    if not isinstance(dataset.get("variant_rows"), list):
+        dataset["variant_rows"] = make_isbt_variant_rows(dataset.get("variants", []))
+    if not isinstance(dataset.get("table_updates"), list):
+        updates, _ = build_isbt_table_update_rows(dataset.get("variants", []), max_events=40, use_history=False)
+        dataset["table_updates"] = updates
+
+    columns = dataset.setdefault("columns", {})
+    if not isinstance(columns.get("grouped_view"), list):
+        columns["grouped_view"] = ISBT_GROUPED_VIEW_COLS
+    if not isinstance(columns.get("variant_view"), list):
+        columns["variant_view"] = ISBT_VARIANT_VIEW_COLS
+    if not isinstance(columns.get("raw_export"), list):
+        variants_for_export = list(dataset.get("variants", [])) + list(dataset.get("variant_rows", []))
+        columns["raw_export"] = sorted(
+            {key for row in variants_for_export for key in row.keys() if not key.startswith("__")}
+        )
+
+    meta = dataset.setdefault("metadata", {})
+    meta.setdefault("updated_at", "Not available")
+    meta.setdefault("updated_epoch", 0)
+    source_urls = meta.setdefault(
+        "source_urls",
+        [
+            ISBT_SYSTEMS_URL,
+            ISBT_ANTIGEN_URL + "<SYMBOL>",
+            ISBT_ALLELE_URL + "<SYMBOL>",
+            ISBT_RELEASE_SEARCH_URL,
+            ISBT_VARIANT_VERSION_HISTORY_URL + "?variant_id=<ID>&all_versions=true",
+        ],
+    )
+    if isinstance(source_urls, list):
+        version_history_url = ISBT_VARIANT_VERSION_HISTORY_URL + "?variant_id=<ID>&all_versions=true"
+        if version_history_url not in source_urls:
+            source_urls.append(version_history_url)
+    meta.setdefault("pull_errors", [])
+    row_counts = meta.setdefault("row_counts", {})
+    row_counts["systems"] = len(dataset.get("systems", []))
+    row_counts["antigens"] = len(dataset.get("antigens", []))
+    row_counts["alleles"] = len(dataset.get("alleles", []))
+    row_counts["variants"] = len(dataset.get("variants", []))
+    row_counts["grouped_rows"] = len(dataset.get("grouped_rows", []))
+    row_counts["variant_rows"] = len(dataset.get("variant_rows", []))
+    row_counts["table_updates"] = len(dataset.get("table_updates", []))
+    row_counts["releases"] = len(dataset.get("releases", []))
+    return dataset
 
 
 def load_isbt_dataset():
@@ -1241,6 +1525,10 @@ def load_isbt_dataset():
             cached = None
 
     if cached:
+        had_variant_rows = isinstance(cached.get("variant_rows"), list)
+        had_table_updates = isinstance(cached.get("table_updates"), list)
+        had_variant_view_cols = isinstance(cached.get("columns", {}).get("variant_view"), list)
+        cache_shape_updated = False
         updated_epoch = int(cached.get("metadata", {}).get("updated_epoch", 0) or 0)
         if updated_epoch > 0:
             age_days = (now_utc_epoch() - updated_epoch) / 86400.0
@@ -1252,11 +1540,18 @@ def load_isbt_dataset():
                         cached_meta = cached.setdefault("metadata", {})
                         cached_counts = cached_meta.setdefault("row_counts", {})
                         cached_counts["releases"] = len(cached.get("releases", []))
-                        with ISBT_CACHE_PATH.open("w", encoding="utf-8") as handle:
-                            json.dump(cached, handle, ensure_ascii=False)
+                        cache_shape_updated = True
                     except Exception as exc:
                         cached_meta = cached.setdefault("metadata", {})
                         cached_meta["release_feed_error"] = clean_text(exc)
+                cached = ensure_isbt_dataset_shape(cached)
+                if (not had_variant_rows) or (not had_table_updates) or (not had_variant_view_cols) or cache_shape_updated:
+                    try:
+                        with ISBT_CACHE_PATH.open("w", encoding="utf-8") as handle:
+                            json.dump(cached, handle, ensure_ascii=False)
+                    except OSError as exc:
+                        cached_meta = cached.setdefault("metadata", {})
+                        cached_meta["cache_write_error"] = clean_text(exc)
                 return cached
 
     try:
@@ -1265,8 +1560,10 @@ def load_isbt_dataset():
         if cached:
             cached_meta = cached.setdefault("metadata", {})
             cached_meta["refresh_error"] = clean_text(exc)
-            return cached
-        return empty_isbt_dataset(clean_text(exc))
+            return ensure_isbt_dataset_shape(cached)
+        return ensure_isbt_dataset_shape(empty_isbt_dataset(clean_text(exc)))
+
+    fresh = ensure_isbt_dataset_shape(fresh)
 
     # Cache write failures should not discard freshly pulled data.
     try:
@@ -1302,6 +1599,7 @@ INIT_PAYLOAD = {
         "exon": len(exon_table),
         "bridge": len(bridge_table),
         "isbt_grouped": len(isbt_data.get("grouped_rows", [])),
+        "isbt_variant_rows": len(isbt_data.get("variant_rows", [])),
     },
     "columns": {
         "gene_table": gene_view_cols,
@@ -1487,7 +1785,8 @@ INDEX_HTML = """<!doctype html>
       overflow: hidden;
     }
     .gene-search-wrap label,
-    .detail-controls-grid label {
+    .detail-controls-grid label,
+    .isbt-controls-grid label {
       display: block;
       margin-bottom: 4px;
       font-weight: 600;
@@ -1554,9 +1853,20 @@ INDEX_HTML = """<!doctype html>
     }
     .isbt-controls-grid {
       display: grid;
-      grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) 190px;
+      grid-template-columns: minmax(220px, 1fr) minmax(230px, 1fr) minmax(220px, 1fr) 190px;
       gap: 8px;
       align-items: end;
+    }
+    .subtable-toggle {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .btn.active {
+      background: #dbeaf8;
+      border-color: #6a9ecf;
+      font-weight: 600;
     }
     .a2-isbt-layout.group-selector-collapsed .a2-isbt-a {
       display: none;
@@ -1856,6 +2166,13 @@ INDEX_HTML = """<!doctype html>
                       <label for="isbt-table-search">Search ISBT table</label>
                       <input id="isbt-table-search" class="input" type="text" placeholder="Filter grouped allele rows" />
                     </div>
+                    <div>
+                      <label>ISBT subtable</label>
+                      <div class="subtable-toggle">
+                        <button id="isbt-view-allele-btn" class="btn active" type="button">Allele</button>
+                        <button id="isbt-view-variant-btn" class="btn" type="button">Variant</button>
+                      </div>
+                    </div>
                     <div id="isbt-last-updated" class="download-note"></div>
                     <button id="toggle-isbt-selector" class="btn">Hide Group Selector</button>
                   </div>
@@ -2061,8 +2378,14 @@ INDEX_HTML = """<!doctype html>
     }
 
     function isbtDetailBaseRows() {
-      if (!state.selectedIsbtGroup || !DATA.isbt || !Array.isArray(DATA.isbt.grouped_rows)) return [];
-      const rows = DATA.isbt.grouped_rows.filter((row) => text(row.__group) === state.selectedIsbtGroup);
+      if (!state.selectedIsbtGroup || !DATA.isbt) return [];
+      const source = state.granularity === "Allele"
+        ? (Array.isArray(DATA.isbt.grouped_rows) ? DATA.isbt.grouped_rows : [])
+        : (Array.isArray(DATA.isbt.variant_rows) ? DATA.isbt.variant_rows : []);
+      const rows = source.filter((row) => {
+        const rowGroup = text(row.__group || row.Group);
+        return rowGroup === state.selectedIsbtGroup;
+      });
       if (!state.isbtTableSearch.trim()) return rows;
       return rows.filter((row) => {
         const joined = Object.values(row)
@@ -2070,6 +2393,57 @@ INDEX_HTML = """<!doctype html>
           .map(text)
           .join(" || ");
         return matchesSearchGroups(joined, state.isbtTableSearch);
+      });
+    }
+
+    function isbtCurrentDetailColumns() {
+      const isbtCols = (DATA.isbt && DATA.isbt.columns) ? DATA.isbt.columns : {};
+      if (state.granularity === "Allele") {
+        return Array.isArray(isbtCols.grouped_view) ? isbtCols.grouped_view : [];
+      }
+      return Array.isArray(isbtCols.variant_view) ? isbtCols.variant_view : [];
+    }
+
+    function isbtNormalizeVariantRow(row, fallbackGroup) {
+      const group = text(row.__group || row.Group || fallbackGroup);
+      const out = {};
+      out.Group = group;
+      out.__group = group;
+      out.Allele_id = text(row.Allele_id || row.allele_id || "");
+      out.ISBT_Allele = text(row.ISBT_Allele || row.isbt_allele || row.allele_name || "");
+      out.Gene_name = text(row.Gene_name || row.gene_name || row.gene || "");
+      out.Variant_id = text(row.Variant_id || row.variant_id || row.id || "");
+      out["DNA Change"] = text(row["DNA Change"] || row.dna_change || row.input || row.nucleotide_change || row.hgvs || "-") || "-";
+      out["Exon/Intron"] = text(row["Exon/Intron"] || row.exon_intron || "-") || "-";
+      out["HGVS Transcript"] = text(row["HGVS Transcript"] || row.hgvs_transcript || row.input || row.hgvs || "-") || "-";
+      ["sv_allele", "null_allele", "mod_allele", "partial_allele", "weak_allele", "el_allele"].forEach((flag) => {
+        out[flag] = text(row[flag] || "");
+      });
+      return Object.assign({}, row, out);
+    }
+
+    function isbtVariantRowsFromAlleleRow(alleleRow) {
+      const group = text(alleleRow.__group || alleleRow.Group || "");
+      const explicitRows = Array.isArray(alleleRow.__variant_view_rows) ? alleleRow.__variant_view_rows : [];
+      if (explicitRows.length > 0) {
+        return explicitRows.map((row) => isbtNormalizeVariantRow(row, group));
+      }
+      const rawRows = Array.isArray(alleleRow.__raw_variant_rows) ? alleleRow.__raw_variant_rows : [];
+      return rawRows.map((row) => isbtNormalizeVariantRow(row, group));
+    }
+
+    function isbtAlleleRowsFromVariantRow(variantRow) {
+      const groupedRows = (DATA.isbt && Array.isArray(DATA.isbt.grouped_rows)) ? DATA.isbt.grouped_rows : [];
+      const group = text(variantRow.__group || variantRow.Group || "");
+      const alleleId = text(variantRow.Allele_id || variantRow.allele_id || "");
+      const isbtAllele = text(variantRow.ISBT_Allele || variantRow.isbt_allele || "");
+      return groupedRows.filter((row) => {
+        if (group && text(row.__group) !== group) return false;
+        const rowAlleleId = text(row.Allele_id || "");
+        const rowIsbtAllele = text(row.ISBT_Allele || "");
+        if (alleleId && rowAlleleId === alleleId) return true;
+        if (isbtAllele && rowIsbtAllele === isbtAllele) return true;
+        return false;
       });
     }
 
@@ -2085,13 +2459,16 @@ INDEX_HTML = """<!doctype html>
     }
 
     function setActiveButtons() {
-      return;
+      const alleleBtn = document.getElementById("isbt-view-allele-btn");
+      const variantBtn = document.getElementById("isbt-view-variant-btn");
+      if (alleleBtn) alleleBtn.classList.toggle("active", state.granularity === "Allele");
+      if (variantBtn) variantBtn.classList.toggle("active", state.granularity === "Variant");
     }
 
     function currentVisibleStateText() {
       return "Mode: ISBT"
         + " | Group: " + (state.selectedIsbtGroup || "")
-        + " | View: ISBT_Grouped_Table"
+        + " | View: ISBT_" + (state.granularity === "Allele" ? "Allele_Table" : "Variant_Table")
         + " | GroupSearch: " + state.isbtGroupSearch
         + " | ISBTTableSearch: " + state.isbtTableSearch;
     }
@@ -2102,15 +2479,19 @@ INDEX_HTML = """<!doctype html>
 
     function activeTableInfo() {
       if (state.activeTable === "isbtDetail") {
-        return { label: "ISBT Grouped Table", checked: state.checked.isbtDetail };
+        const label = state.granularity === "Allele" ? "ISBT Allele Table" : "ISBT Variant Table";
+        return { label: label, checked: state.checked.isbtDetail };
       }
       if (state.activeTable === "modalVariants") {
-        return { label: "Variants Popup Table", checked: state.checked.modalVariants };
+        const label = state.modal.type === "isbtVariants" ? "ISBT Variants Popup Table" : "Variants Popup Table";
+        return { label: label, checked: state.checked.modalVariants };
       }
       if (state.activeTable === "modalAlleles") {
-        return { label: "Alleles Popup Table", checked: state.checked.modalAlleles };
+        const label = state.modal.type === "isbtAlleles" ? "ISBT Alleles Popup Table" : "Alleles Popup Table";
+        return { label: label, checked: state.checked.modalAlleles };
       }
-      return { label: "ISBT Grouped Table", checked: state.checked.isbtDetail };
+      const fallbackLabel = state.granularity === "Allele" ? "ISBT Allele Table" : "ISBT Variant Table";
+      return { label: fallbackLabel, checked: state.checked.isbtDetail };
     }
 
     function updateDownloadContext() {
@@ -2397,11 +2778,11 @@ INDEX_HTML = """<!doctype html>
 
         tr.addEventListener("click", (ev) => {
           if (ev.target && ev.target.tagName === "INPUT") return;
-          if (typeof config.onRowClick === "function") config.onRowClick(row, idx, key);
+          if (typeof config.onRowClick === "function") config.onRowClick(row, idx, key, rawRow);
         });
         tr.addEventListener("dblclick", (ev) => {
           if (ev.target && ev.target.tagName === "INPUT") return;
-          if (typeof config.onRowDblClick === "function") config.onRowDblClick(row, idx, key);
+          if (typeof config.onRowDblClick === "function") config.onRowDblClick(row, idx, key, rawRow);
         });
         tbody.appendChild(tr);
       });
@@ -2532,10 +2913,10 @@ INDEX_HTML = """<!doctype html>
       state.modal.type = type;
       state.modal.rows = rows.slice();
       state.modal.title = title;
-      if (type === "variants") {
+      if (type === "variants" || type === "isbtVariants") {
         state.checked.modalVariants.clear();
         state.activeTable = "modalVariants";
-      } else if (type === "alleles") {
+      } else if (type === "alleles" || type === "isbtAlleles") {
         state.checked.modalAlleles.clear();
         state.activeTable = "modalAlleles";
       }
@@ -2575,6 +2956,22 @@ INDEX_HTML = """<!doctype html>
           vizSource: "variant",
           maxHeight: "45vh"
         });
+      } else if (state.modal.type === "isbtVariants") {
+        const columns = (DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.variant_view))
+          ? DATA.isbt.columns.variant_view
+          : [];
+        const rawRows = state.modal.rows.slice();
+        const displayRows = rawRows.map((r) => normalizeRow(r, columns));
+        renderTable("modal-table", {
+          rows: displayRows,
+          rawRows: rawRows,
+          columns: columns,
+          rowKey: (row, idx) => String(idx + 1),
+          checkedSet: state.checked.modalVariants,
+          tableKey: "modalVariants",
+          vizSource: "isbt",
+          maxHeight: "45vh"
+        });
       } else if (state.modal.type === "alleles") {
         const displayRows = state.modal.rows.map((r) => normalizeRow(r, DATA.columns.allele_view));
         renderTable("modal-table", {
@@ -2584,6 +2981,22 @@ INDEX_HTML = """<!doctype html>
           checkedSet: state.checked.modalAlleles,
           tableKey: "modalAlleles",
           multilineCols: ["Variants"],
+          maxHeight: "45vh"
+        });
+      } else if (state.modal.type === "isbtAlleles") {
+        const columns = (DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.grouped_view))
+          ? DATA.isbt.columns.grouped_view
+          : [];
+        const displayRows = state.modal.rows.map((r) => normalizeRow(r, columns));
+        renderTable("modal-table", {
+          rows: displayRows,
+          rawRows: state.modal.rows,
+          columns: columns,
+          rowKey: (row, idx) => String(idx + 1),
+          checkedSet: state.checked.modalAlleles,
+          tableKey: "modalAlleles",
+          multilineCols: ["DNA Change", "Exon/Intron", "HGVS Transcript"],
+          vizSource: "isbt",
           maxHeight: "45vh"
         });
       }
@@ -2664,37 +3077,63 @@ INDEX_HTML = """<!doctype html>
 
     function renderIsbtMode() {
       ensureSelectedIsbtGroup();
+      setActiveButtons();
       renderIsbtGroupSelectorTable();
 
       const lastUpdated = document.getElementById("isbt-last-updated");
+      const tableSearchInput = document.getElementById("isbt-table-search");
       const isbtMeta = (DATA.isbt && DATA.isbt.metadata) ? DATA.isbt.metadata : {};
       const updatedText = text(isbtMeta.updated_at || "Not available");
       const groupedCount = Number((isbtMeta.row_counts || {}).grouped_rows || 0).toLocaleString();
+      const variantCount = Number((isbtMeta.row_counts || {}).variant_rows || 0).toLocaleString();
       const metaNotes = [];
       if (isbtMeta.refresh_error) metaNotes.push("refresh error");
       if (isbtMeta.cache_write_error) metaNotes.push("cache not persisted");
       if (lastUpdated) {
         const noteSuffix = metaNotes.length > 0 ? (" | Notes: " + metaNotes.join(", ")) : "";
-        lastUpdated.textContent = "Last pulled: " + updatedText + " | Grouped rows: " + groupedCount + noteSuffix;
+        lastUpdated.textContent = "Last pulled: " + updatedText + " | Allele rows: " + groupedCount + " | Variant rows: " + variantCount + noteSuffix;
+      }
+      if (tableSearchInput) {
+        tableSearchInput.placeholder = state.granularity === "Allele"
+          ? "Filter grouped allele rows"
+          : "Filter variant rows";
       }
 
       const detailRows = isbtDetailBaseRows();
-      const columns = (DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.grouped_view))
-        ? DATA.isbt.columns.grouped_view
-        : [];
+      const columns = isbtCurrentDetailColumns();
       const displayRows = detailRows.map((row) => normalizeRow(row, columns));
 
-      renderTable("isbt-detail-table", {
+      const tableConfig = {
         rows: displayRows,
         rawRows: detailRows,
         columns: columns,
         rowKey: (row, idx) => String(idx + 1),
         checkedSet: state.checked.isbtDetail,
         tableKey: "isbtDetail",
-        multilineCols: ["DNA Change", "Exon/Intron", "HGVS Transcript"],
         vizSource: "isbt",
         maxHeight: "100%"
-      });
+      };
+
+      if (state.granularity === "Allele") {
+        tableConfig.multilineCols = ["DNA Change", "Exon/Intron", "HGVS Transcript"];
+        tableConfig.onRowClick = (row, idx, key, rawRow) => {
+          const source = rawRow || row;
+          const rows = isbtVariantRowsFromAlleleRow(source);
+          const label = text(source.ISBT_Allele || source.Allele_id || source.__row_key || "");
+          openRelationModal("isbtVariants", "Variants associated with allele " + label, rows);
+        };
+      } else {
+        tableConfig.onRowClick = (row, idx, key, rawRow) => {
+          const source = rawRow || row;
+          const rows = isbtAlleleRowsFromVariantRow(source);
+          const variantId = text(source.Variant_id || source.variant_id || "");
+          const dna = text(source["DNA Change"] || source.dna_change || source.input || "");
+          const label = dna ? (variantId + " (" + dna + ")") : variantId;
+          openRelationModal("isbtAlleles", "Alleles associated with variant " + label, rows);
+        };
+      }
+
+      renderTable("isbt-detail-table", tableConfig);
     }
 
     function refreshMainPanels() {
@@ -2789,21 +3228,30 @@ INDEX_HTML = """<!doctype html>
           filename = "variant_detail_table_checked_rows_" + dateTag + ".csv";
         }
       } else if (state.activeTable === "modalVariants") {
-        columns = DATA.columns.variant_view;
+        columns = state.modal.type === "isbtVariants"
+          ? ((DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.variant_view)) ? DATA.isbt.columns.variant_view : [])
+          : DATA.columns.variant_view;
         rows = checkedRowsByIndex(state.modal.rows, state.checked.modalVariants).map((r) => normalizeRow(r, columns));
         filename = "variants_popup_checked_rows_" + dateTag + ".csv";
       } else if (state.activeTable === "modalAlleles") {
-        columns = DATA.columns.allele_view;
+        columns = state.modal.type === "isbtAlleles"
+          ? ((DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.grouped_view)) ? DATA.isbt.columns.grouped_view : [])
+          : DATA.columns.allele_view;
         rows = checkedRowsByIndex(state.modal.rows, state.checked.modalAlleles).map((r) => normalizeRow(r, columns));
         filename = "alleles_popup_checked_rows_" + dateTag + ".csv";
       } else if (state.activeTable === "isbtDetail") {
         columns = (DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.raw_export))
           ? DATA.isbt.columns.raw_export
           : [];
-        const groupedRows = checkedRowsByIndex(isbtDetailBaseRows(), state.checked.isbtDetail);
-        const rawRows = expandIsbtGroupedRows(groupedRows);
-        rows = rawRows.map((r) => normalizeRow(r, columns));
-        filename = "isbt_grouped_selection_expanded_" + dateTag + ".csv";
+        const detailRows = checkedRowsByIndex(isbtDetailBaseRows(), state.checked.isbtDetail);
+        if (state.granularity === "Allele") {
+          const rawRows = expandIsbtGroupedRows(detailRows);
+          rows = rawRows.map((r) => normalizeRow(r, columns));
+          filename = "isbt_grouped_selection_expanded_" + dateTag + ".csv";
+        } else {
+          rows = detailRows.map((r) => normalizeRow(r, columns));
+          filename = "isbt_variant_selection_raw_" + dateTag + ".csv";
+        }
       }
 
       saveCsv(rows, columns, filename);
@@ -2815,17 +3263,31 @@ INDEX_HTML = """<!doctype html>
         const rows = checkedRowsByIndex(state.modal.rows, state.checked.modalVariants)
           .map((r) => normalizeRow(r, DATA.columns.variant_view));
         saveCsv(rows, DATA.columns.variant_view, "variants_popup_checked_rows_" + dateTag + ".csv");
+      } else if (state.modal.type === "isbtVariants") {
+        const columns = (DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.variant_view))
+          ? DATA.isbt.columns.variant_view
+          : [];
+        const rows = checkedRowsByIndex(state.modal.rows, state.checked.modalVariants)
+          .map((r) => normalizeRow(r, columns));
+        saveCsv(rows, columns, "isbt_variants_popup_checked_rows_" + dateTag + ".csv");
       } else if (state.modal.type === "alleles") {
         const rows = checkedRowsByIndex(state.modal.rows, state.checked.modalAlleles)
           .map((r) => normalizeRow(r, DATA.columns.allele_view));
         saveCsv(rows, DATA.columns.allele_view, "alleles_popup_checked_rows_" + dateTag + ".csv");
+      } else if (state.modal.type === "isbtAlleles") {
+        const columns = (DATA.isbt && DATA.isbt.columns && Array.isArray(DATA.isbt.columns.grouped_view))
+          ? DATA.isbt.columns.grouped_view
+          : [];
+        const rows = checkedRowsByIndex(state.modal.rows, state.checked.modalAlleles)
+          .map((r) => normalizeRow(r, columns));
+        saveCsv(rows, columns, "isbt_alleles_popup_checked_rows_" + dateTag + ".csv");
       }
     }
 
     function clearModalSelection() {
-      if (state.modal.type === "variants") {
+      if (state.modal.type === "variants" || state.modal.type === "isbtVariants") {
         state.checked.modalVariants.clear();
-      } else if (state.modal.type === "alleles") {
+      } else if (state.modal.type === "alleles" || state.modal.type === "isbtAlleles") {
         state.checked.modalAlleles.clear();
       }
       renderModalTable();
@@ -2853,25 +3315,33 @@ INDEX_HTML = """<!doctype html>
       root.innerHTML = "";
       const ul = document.createElement("ul");
       const isbtMeta = (DATA.isbt && DATA.isbt.metadata) ? DATA.isbt.metadata : {};
-      const releases = (DATA.isbt && Array.isArray(DATA.isbt.releases)) ? DATA.isbt.releases : [];
+      const tableUpdates = (DATA.isbt && Array.isArray(DATA.isbt.table_updates)) ? DATA.isbt.table_updates : [];
 
       const lines = [];
-      if (releases.length > 0) {
-        lines.push("ISBT release history (latest first):");
-        releases.slice(0, 10).forEach((release) => {
-          const version = text(release.releaseVersion || "?");
-          const name = text(release.name || "Unnamed release");
-          const applied = formatUtcDateTime(release.appliedAt || release.updatedAt || "");
-          const suggestionCount = Number(release.suggestionCount || 0).toLocaleString();
-          const notesSummary = text(release.notesSummary || "");
-          let line = "Release " + version + " - " + name + " | Applied: " + applied + " | Suggestions: " + suggestionCount;
-          if (notesSummary) {
-            line += " | Notes: " + notesSummary;
-          }
+      if (tableUpdates.length > 0) {
+        lines.push("ISBT table revision history (latest first):");
+        tableUpdates.slice(0, 12).forEach((item) => {
+          const eventAt = formatUtcDateTime(item.eventAt || item.updatedAt || "");
+          const group = text(item.Group || "");
+          const operation = text(item.operation || "update");
+          const allele = text(item.ISBT_Allele || item.Allele_id || "?");
+          const variantId = text(item.Variant_id || "?");
+          const dna = text(item["DNA Change"] || "-");
+          const version = text(item.version || "");
+          const actor = text(item.actor || "");
+
+          let line = eventAt
+            + " | " + group
+            + " | " + operation
+            + " | " + allele
+            + " | " + variantId
+            + " | " + dna;
+          if (version) line += " | v" + version;
+          if (actor) line += " | by " + actor;
           lines.push(line);
         });
       } else {
-        lines.push("No ISBT release history is currently available.");
+        lines.push("No ISBT table revision updates are currently available.");
       }
 
       lines.push("ISBT data pulled: " + text(isbtMeta.updated_at || "Not available"));
@@ -2880,9 +3350,6 @@ INDEX_HTML = """<!doctype html>
       const pullErrors = Array.isArray(isbtMeta.pull_errors) ? isbtMeta.pull_errors : [];
       if (pullErrors.length > 0) {
         lines.push("ISBT refresh warnings: " + pullErrors.length.toLocaleString() + " fetch errors.");
-      }
-      if (isbtMeta.release_feed_error) {
-        lines.push("ISBT release feed warning: " + text(isbtMeta.release_feed_error));
       }
       if (isbtMeta.refresh_error) {
         lines.push("ISBT refresh error: " + text(isbtMeta.refresh_error));
@@ -2972,6 +3439,26 @@ INDEX_HTML = """<!doctype html>
         renderIsbtMode();
         updateStateField();
         updateDownloadContext();
+      });
+      bind("isbt-view-allele-btn", "click", () => {
+        if (state.granularity !== "Allele") {
+          if (state.modal.open) closeRelationModal();
+          state.granularity = "Allele";
+          state.checked.isbtDetail.clear();
+          renderIsbtMode();
+          updateStateField();
+          updateDownloadContext();
+        }
+      });
+      bind("isbt-view-variant-btn", "click", () => {
+        if (state.granularity !== "Variant") {
+          if (state.modal.open) closeRelationModal();
+          state.granularity = "Variant";
+          state.checked.isbtDetail.clear();
+          renderIsbtMode();
+          updateStateField();
+          updateDownloadContext();
+        }
       });
       bind("toggle-panel-b", "click", () => {
         state.panelBCollapsed = !state.panelBCollapsed;

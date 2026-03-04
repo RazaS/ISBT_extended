@@ -1935,6 +1935,18 @@ INDEX_HTML = """<!doctype html>
       width: 100%;
       min-width: 0;
     }
+    .table-top-scroll {
+      border: 1px solid #d9dce1;
+      border-radius: 6px;
+      background: #fff;
+      overflow-x: auto;
+      overflow-y: hidden;
+      height: 14px;
+      margin-bottom: 6px;
+    }
+    .table-top-scroll-inner {
+      height: 1px;
+    }
     table.data-table {
       width: max-content;
       min-width: 100%;
@@ -1966,6 +1978,15 @@ INDEX_HTML = """<!doctype html>
       width: 25ch;
       min-width: 25ch;
       max-width: 25ch;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    table.data-table th.tight-wrap-col,
+    table.data-table td.tight-wrap-col {
+      width: 16ch;
+      min-width: 16ch;
+      max-width: 16ch;
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
@@ -2729,6 +2750,9 @@ INDEX_HTML = """<!doctype html>
       const truncateTooltipCols = new Set(config.truncateTooltipCols || []);
       const truncateLength = Number.isInteger(config.truncateLength) ? config.truncateLength : 10;
       const wrapCols = new Set(["Allele_name", "Reference_No_PMID", "Accession_number", "Phenotype"]);
+      (config.wrapCols || []).forEach((col) => wrapCols.add(col));
+      const tightWrapCols = new Set(config.tightWrapCols || []);
+      const showTopScrollbar = !!config.topScrollbar;
       const vizSource = text(config.vizSource || "").trim();
       const showViz = !!vizSource;
       const rowKey = typeof config.rowKey === "function"
@@ -2744,6 +2768,15 @@ INDEX_HTML = """<!doctype html>
       shell.className = "table-shell";
       shell.style.maxHeight = maxHeight;
       shell.style.height = maxHeight;
+      let topScroll = null;
+      let topScrollInner = null;
+      if (showTopScrollbar) {
+        topScroll = document.createElement("div");
+        topScroll.className = "table-top-scroll";
+        topScrollInner = document.createElement("div");
+        topScrollInner.className = "table-top-scroll-inner";
+        topScroll.appendChild(topScrollInner);
+      }
 
       if (rows.length === 0) {
         const empty = document.createElement("div");
@@ -2751,6 +2784,7 @@ INDEX_HTML = """<!doctype html>
         empty.style.padding = "10px";
         empty.textContent = "No rows to display.";
         shell.appendChild(empty);
+        if (topScroll) container.appendChild(topScroll);
         container.appendChild(shell);
         return;
       }
@@ -2773,6 +2807,7 @@ INDEX_HTML = """<!doctype html>
         const th = document.createElement("th");
         th.textContent = col;
         if (wrapCols.has(col)) th.classList.add("allele-name-col");
+        if (tightWrapCols.has(col)) th.classList.add("tight-wrap-col");
         htr.appendChild(th);
       });
       thead.appendChild(htr);
@@ -2828,6 +2863,7 @@ INDEX_HTML = """<!doctype html>
           }
           if (multilineCols.has(col)) td.classList.add("multiline");
           if (wrapCols.has(col)) td.classList.add("allele-name-col");
+          if (tightWrapCols.has(col)) td.classList.add("tight-wrap-col");
           tr.appendChild(td);
         });
 
@@ -2844,6 +2880,32 @@ INDEX_HTML = """<!doctype html>
       table.appendChild(tbody);
 
       shell.appendChild(table);
+      if (topScroll && topScrollInner) {
+        let syncing = false;
+        const syncTopBarWidth = () => {
+          topScrollInner.style.width = table.scrollWidth + "px";
+          topScroll.scrollLeft = shell.scrollLeft;
+        };
+        topScroll.addEventListener("scroll", () => {
+          if (syncing) return;
+          syncing = true;
+          shell.scrollLeft = topScroll.scrollLeft;
+          syncing = false;
+        });
+        shell.addEventListener("scroll", () => {
+          if (syncing) return;
+          syncing = true;
+          topScroll.scrollLeft = shell.scrollLeft;
+          syncing = false;
+        });
+        syncTopBarWidth();
+        if (window.ResizeObserver) {
+          const observer = new ResizeObserver(syncTopBarWidth);
+          observer.observe(shell);
+          observer.observe(table);
+        }
+        container.appendChild(topScroll);
+      }
       container.appendChild(shell);
     }
 
@@ -3178,6 +3240,9 @@ INDEX_HTML = """<!doctype html>
           openRelationModal("isbtVariants", "Variants associated with allele " + label, rows);
         };
       } else {
+        tableConfig.wrapCols = ["Allele_id", "ISBT_Allele"];
+        tableConfig.tightWrapCols = ["Allele_id", "ISBT_Allele"];
+        tableConfig.topScrollbar = true;
         tableConfig.onRowClick = (row, idx, key, rawRow) => {
           const source = rawRow || row;
           const rows = isbtAlleleRowsFromVariantRow(source);

@@ -1800,6 +1800,9 @@ INDEX_HTML = """<!doctype html>
     }
     .sidebar-toggle-wrap {
       margin-left: auto;
+      display: flex;
+      gap: 8px;
+      align-items: center;
     }
     .toggle-btn {
       border: 1px solid #b8b8b8;
@@ -2126,6 +2129,17 @@ INDEX_HTML = """<!doctype html>
       justify-content: flex-end;
       flex-wrap: wrap;
     }
+    .help-content {
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .help-content ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    .help-content li {
+      margin-bottom: 8px;
+    }
     .btn {
       border: 1px solid #b8b8b8;
       border-radius: 6px;
@@ -2266,6 +2280,7 @@ INDEX_HTML = """<!doctype html>
           <div class="mode-row">
             <strong style="font-size: 18px;">ISBT Table</strong>
             <div class="sidebar-toggle-wrap">
+              <button id="nav-help-btn" class="btn">Navigation Help</button>
               <button id="toggle-panel-b" class="btn">Hide Sidebar</button>
             </div>
           </div>
@@ -2368,6 +2383,25 @@ INDEX_HTML = """<!doctype html>
           <span id="viz-scale-label" class="viz-scale-label">100%</span>
         </div>
         <button id="viz-close-btn" class="btn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="help-modal" class="modal-overlay">
+    <div class="modal-box" style="width: min(900px, 95vw);">
+      <div class="modal-head">Navigation Instructions</div>
+      <div class="modal-body">
+        <div class="help-content">
+          <ul>
+            <li>Use the left <strong>Group</strong> selector to choose an ISBT system group, then use the top <strong>ISBT subtable</strong> buttons to switch between <strong>Allele</strong> and <strong>Variant</strong> tables.</li>
+            <li>Search supports <strong>AND/OR</strong> logic: use commas for <strong>OR</strong> and semicolons for <strong>AND</strong>. Example: <code>ABO,RH;Exon 7</code> means <em>(ABO OR RH) AND Exon 7</em>.</li>
+            <li>Double-click allele or variant rows to open the linked popup table (allele to variants, variant to alleles). Single-click is also supported.</li>
+            <li>Use row checkboxes to select entries, then click <strong>Download CSV</strong> to export selected rows from the currently active table. Use <strong>Clear All</strong> to clear selections.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="help-close-btn" class="btn">Close</button>
       </div>
     </div>
   </div>
@@ -2665,6 +2699,14 @@ INDEX_HTML = """<!doctype html>
       state.vizScale = 1.0;
       const label = document.getElementById("viz-scale-label");
       if (label) label.textContent = "100%";
+    }
+
+    function openHelpModal() {
+      document.getElementById("help-modal").classList.add("open");
+    }
+
+    function closeHelpModal() {
+      document.getElementById("help-modal").classList.remove("open");
     }
 
     function applyVizScale() {
@@ -3289,17 +3331,19 @@ INDEX_HTML = """<!doctype html>
       if (state.granularity === "Allele") {
         tableConfig.multilineCols = ["DNA Change", "Exon/Intron", "HGVS Transcript"];
         tableConfig.topScrollbar = true;
-        tableConfig.onRowClick = (row, idx, key, rawRow) => {
+        const openAlleleVariantPopup = (row, idx, key, rawRow) => {
           const source = rawRow || row;
           const rows = isbtVariantRowsFromAlleleRow(source);
           const label = text(source.ISBT_Allele || source.Allele_id || source.__row_key || "");
           openRelationModal("isbtVariants", "Variants associated with allele " + label, rows);
         };
+        tableConfig.onRowClick = openAlleleVariantPopup;
+        tableConfig.onRowDblClick = openAlleleVariantPopup;
       } else {
         tableConfig.wrapCols = ["Allele_id", "ISBT_Allele"];
         tableConfig.tightWrapCols = ["Allele_id", "ISBT_Allele"];
         tableConfig.topScrollbar = true;
-        tableConfig.onRowClick = (row, idx, key, rawRow) => {
+        const openVariantAllelePopup = (row, idx, key, rawRow) => {
           const source = rawRow || row;
           const rows = isbtAlleleRowsFromVariantRow(source);
           const variantId = text(source.Variant_id || source.variant_id || "");
@@ -3307,6 +3351,8 @@ INDEX_HTML = """<!doctype html>
           const label = dna ? (variantId + " (" + dna + ")") : variantId;
           openRelationModal("isbtAlleles", "Alleles associated with variant " + label, rows);
         };
+        tableConfig.onRowClick = openVariantAllelePopup;
+        tableConfig.onRowDblClick = openVariantAllelePopup;
       }
 
       renderTable("isbt-detail-table", tableConfig);
@@ -3636,6 +3682,7 @@ INDEX_HTML = """<!doctype html>
           updateDownloadContext();
         }
       });
+      bind("nav-help-btn", "click", openHelpModal);
       bind("toggle-panel-b", "click", () => {
         state.panelBCollapsed = !state.panelBCollapsed;
         applyLayoutState();
@@ -3666,6 +3713,10 @@ INDEX_HTML = """<!doctype html>
       });
       bind("viz-modal", "click", (ev) => {
         if (ev.target.id === "viz-modal") closeVizModal();
+      });
+      bind("help-close-btn", "click", closeHelpModal);
+      bind("help-modal", "click", (ev) => {
+        if (ev.target.id === "help-modal") closeHelpModal();
       });
     }
 

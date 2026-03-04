@@ -342,6 +342,60 @@ def build_snv_sequence_panel(row):
     return panel
 
 
+def normalize_row_for_snv_panel(row):
+    if not isinstance(row, dict):
+        return {}
+    out = dict(row)
+
+    chrom = first_nonempty_ci(out, ["Chromosome", "chromosome", "grch38_chr", "grch37_chr", "chr"])
+    start = first_nonempty_ci(out, ["Hg38_start", "hg38_start", "Start", "start", "grch38_pos", "grch37_pos", "position"])
+    end = first_nonempty_ci(out, ["Hg38_end", "hg38_end", "End", "end", "grch38_pos", "grch37_pos", "position"])
+    ref = first_nonempty_ci(out, ["Ref_allele_curated", "Ref_allele", "Ref", "ref", "grch38_ref", "grch37_ref"])
+    alt = first_nonempty_ci(out, ["Alt_allele_curated", "Alt_allele", "Alt", "alt", "grch38_alt", "grch37_alt"])
+
+    if chrom:
+        out["Chromosome"] = chrom
+    if start:
+        out["Hg38_start"] = start
+    if end:
+        out["Hg38_end"] = end
+    if ref:
+        out["Ref_allele_curated"] = ref
+    if alt:
+        out["Alt_allele_curated"] = alt
+    return out
+
+
+def build_isbt_snv_sequence_panel(row):
+    candidates = []
+    raw_rows = row.get("__raw_variant_rows")
+    if isinstance(raw_rows, list) and raw_rows:
+        candidates.extend([item for item in raw_rows if isinstance(item, dict)])
+    if isinstance(row, dict):
+        candidates.append(row)
+
+    if not candidates:
+        return {
+            "status": "unavailable",
+            "message": "Sequence unavailable: no variant row data supplied.",
+            "rows": [],
+        }
+
+    best_panel = None
+    for candidate in candidates:
+        panel = build_snv_sequence_panel(normalize_row_for_snv_panel(candidate))
+        if panel.get("status") == "ok":
+            return panel
+        if best_panel is None:
+            best_panel = panel
+
+    return best_panel or {
+        "status": "not_applicable",
+        "message": "Sequence table shown only for SNVs with single-base REF/ALT.",
+        "rows": [],
+    }
+
+
 def build_exon_index(rows):
     index = {}
     for row in rows:
@@ -592,6 +646,7 @@ def build_row_viz_payload(source, row):
         bundle = build_isbt_viz_bundle(row)
         features = bundle["features"]
         title = f"ISBT Viz: {clean_text(row.get('ISBT_Allele') or row.get('Allele_id') or row.get('Group') or '')}"
+        sequence_panel = build_isbt_snv_sequence_panel(row)
     else:
         return {"ok": False, "error": "Unsupported viz source."}
 

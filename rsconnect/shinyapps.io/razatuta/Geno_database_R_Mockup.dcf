@@ -1,0 +1,12 @@
+name: Geno_database_R_Mockup
+title: Geno_database_R_Mockup
+username: razatuta
+account: razatuta
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16787875
+bundleId: 11644975
+url: https://razatuta.shinyapps.io/Geno_database_R_Mockup/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

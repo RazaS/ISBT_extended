@@ -767,6 +767,7 @@ ISBT_GROUPED_VIEW_COLS = [
     "Group",
     "Allele_id",
     "ISBT_Allele",
+    "ISBT_Phenotype",
     "Gene_name",
     "DNA Change",
     "Exon/Intron",
@@ -1119,7 +1120,8 @@ def make_isbt_variant_rows(variants_rows):
     return out_rows
 
 
-def make_isbt_grouped_rows(variants_rows):
+def make_isbt_grouped_rows(variants_rows, allele_lookup=None):
+    allele_lookup = allele_lookup if isinstance(allele_lookup, dict) else {}
     by_group = {}
     for row in variants_rows:
         for group in variant_target_groups(row):
@@ -1154,10 +1156,14 @@ def make_isbt_grouped_rows(variants_rows):
                 hgvs_lines.append(first_nonempty_ci(raw, ["HGVS Transcript", "hgvs_transcript", "input", "hgvs"]) or "-")
 
             first_row = rows_sorted[0]
+            allele_meta = allele_lookup.get(clean_text(first_nonempty_ci(first_row, ["allele_id"])), {})
             grouped_row = {
                 "Group": group,
                 "Allele_id": first_nonempty_ci(first_row, ["allele_id"]),
                 "ISBT_Allele": first_nonempty_ci(first_row, ["isbt_allele", "allele_name"]),
+                "ISBT_Phenotype": first_nonempty_ci(first_row, ["isbt_phenotype"]) or first_nonempty_ci(
+                    allele_meta, ["isbt_phenotype"]
+                ),
                 "Gene_name": first_nonempty_ci(first_row, ["gene_name", "gene"]),
                 "DNA Change": "\n".join(dna_lines),
                 "Exon/Intron": "\n".join(exon_intron_lines),
@@ -1369,6 +1375,7 @@ def build_isbt_dataset():
                 allele_id = f"{symbol}:{len(alleles) + 1}"
             flat_allele["allele_id"] = allele_id
             flat_allele["isbt_allele"] = first_nonempty_ci(flat_allele, ["isbt_allele", "allele_name", "name"])
+            flat_allele["isbt_phenotype"] = first_nonempty_ci(flat_allele, ["isbt_phenotype"])
             flat_allele["gene_name"] = first_nonempty_ci(flat_allele, ["gene_name", "gene", "gene_symbol"])
 
             for flag_col in ISBT_FLAG_COLS:
@@ -1391,6 +1398,8 @@ def build_isbt_dataset():
                     flat_variant["allele_id"] = allele_id
                     if not first_nonempty_ci(flat_variant, ["isbt_allele"]):
                         flat_variant["isbt_allele"] = flat_allele.get("isbt_allele", "")
+                    if not first_nonempty_ci(flat_variant, ["isbt_phenotype"]):
+                        flat_variant["isbt_phenotype"] = flat_allele.get("isbt_phenotype", "")
                     if not first_nonempty_ci(flat_variant, ["gene_name", "gene"]):
                         flat_variant["gene_name"] = flat_allele.get("gene_name", "")
                     variants.append(flat_variant)
@@ -1424,6 +1433,8 @@ def build_isbt_dataset():
             allele_id = f"missing:{idx}"
         out["allele_id"] = allele_id
         out["isbt_allele"] = first_nonempty_ci(out, ["isbt_allele", "allele_name"])
+        if not first_nonempty_ci(out, ["isbt_phenotype"]):
+            out["isbt_phenotype"] = first_nonempty_ci(allele_by_id.get(allele_id, {}), ["isbt_phenotype"])
         out["gene_name"] = first_nonempty_ci(out, ["gene_name", "gene", "gene_symbol"])
         out["variant_id"] = first_nonempty_ci(out, ["variant_id", "id"]) or f"v:{idx}"
 
@@ -1460,7 +1471,7 @@ def build_isbt_dataset():
             groups.append(symbol)
     groups = unique_keep_order(groups)
 
-    grouped_rows = make_isbt_grouped_rows(variants)
+    grouped_rows = make_isbt_grouped_rows(variants, allele_lookup=allele_by_id)
     variant_rows = make_isbt_variant_rows(variants)
     table_updates, revision_warnings = build_isbt_table_update_rows(variants, max_events=40, use_history=True)
     pull_errors.extend(revision_warnings)
@@ -1565,8 +1576,15 @@ def ensure_isbt_dataset_shape(dataset):
     dataset.setdefault("groups", [])
     dataset.setdefault("grouped_rows", [])
 
-    if not isinstance(dataset.get("grouped_rows"), list):
-        dataset["grouped_rows"] = make_isbt_grouped_rows(dataset.get("variants", []))
+    allele_lookup = {}
+    for row in dataset.get("alleles", []):
+        allele_id = clean_text(row.get("allele_id", ""))
+        if allele_id and allele_id not in allele_lookup:
+            allele_lookup[allele_id] = dict(row)
+
+    # Always regenerate grouped_rows so newly added derived columns are available
+    # immediately even when the cache was created by an older app version.
+    dataset["grouped_rows"] = make_isbt_grouped_rows(dataset.get("variants", []), allele_lookup=allele_lookup)
     if not isinstance(dataset.get("groups"), list):
         dataset["groups"] = []
     # Always regenerate variant_rows to keep one-row-per-Variant_id guarantees
@@ -1577,8 +1595,7 @@ def ensure_isbt_dataset_shape(dataset):
         dataset["table_updates"] = updates
 
     columns = dataset.setdefault("columns", {})
-    if not isinstance(columns.get("grouped_view"), list):
-        columns["grouped_view"] = ISBT_GROUPED_VIEW_COLS
+    columns["grouped_view"] = ISBT_GROUPED_VIEW_COLS
     if not isinstance(columns.get("variant_view"), list):
         columns["variant_view"] = ISBT_VARIANT_VIEW_COLS
     if not isinstance(columns.get("raw_export"), list):

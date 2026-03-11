@@ -2066,6 +2066,16 @@ INDEX_HTML = """<!doctype html>
       overflow-wrap: anywhere;
       word-break: break-word;
     }
+    table.data-table th.phenotype-col,
+    table.data-table td.phenotype-col {
+      width: 14ch;
+      min-width: 14ch;
+      max-width: 14ch;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font: inherit;
+    }
     table.data-table tr.selected-row {
       background: #dbeafe;
     }
@@ -2866,6 +2876,7 @@ INDEX_HTML = """<!doctype html>
       const wrapCols = new Set(["Allele_name", "Reference_No_PMID", "Accession_number", "Phenotype"]);
       (config.wrapCols || []).forEach((col) => wrapCols.add(col));
       const tightWrapCols = new Set(config.tightWrapCols || []);
+      const phenotypeCols = new Set(config.phenotypeCols || []);
       const showTopScrollbar = !!config.topScrollbar;
       const vizSource = text(config.vizSource || "").trim();
       const showViz = !!vizSource;
@@ -2922,6 +2933,7 @@ INDEX_HTML = """<!doctype html>
         th.textContent = col;
         if (wrapCols.has(col)) th.classList.add("allele-name-col");
         if (tightWrapCols.has(col)) th.classList.add("tight-wrap-col");
+        if (phenotypeCols.has(col)) th.classList.add("phenotype-col");
         htr.appendChild(th);
       });
       thead.appendChild(htr);
@@ -2978,6 +2990,7 @@ INDEX_HTML = """<!doctype html>
           if (multilineCols.has(col)) td.classList.add("multiline");
           if (wrapCols.has(col)) td.classList.add("allele-name-col");
           if (tightWrapCols.has(col)) td.classList.add("tight-wrap-col");
+          if (phenotypeCols.has(col)) td.classList.add("phenotype-col");
           tr.appendChild(td);
         });
 
@@ -3227,6 +3240,7 @@ INDEX_HTML = """<!doctype html>
           checkedSet: state.checked.modalAlleles,
           tableKey: "modalAlleles",
           multilineCols: ["DNA Change", "Exon/Intron", "HGVS Transcript"],
+          phenotypeCols: ["ISBT_Phenotype"],
           vizSource: "isbt",
           maxHeight: "45vh"
         });
@@ -3347,6 +3361,7 @@ INDEX_HTML = """<!doctype html>
 
       if (state.granularity === "Allele") {
         tableConfig.multilineCols = ["DNA Change", "Exon/Intron", "HGVS Transcript"];
+        tableConfig.phenotypeCols = ["ISBT_Phenotype"];
         tableConfig.topScrollbar = true;
         const openAlleleVariantPopup = (row, idx, key, rawRow) => {
           const source = rawRow || row;
